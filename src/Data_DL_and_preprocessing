@@ -1,0 +1,330 @@
+import pandas as pd
+import requests
+import os
+import time
+import numpy as np
+from mrmr import mrmr_classif
+from sklearn.feature_selection import SelectKBest, chi2
+
+def clinical_data_filtering():
+    clinical_file_path = 'C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/BRCA - case_id and clinical data.tsv'
+    case_id_selection_path = 'C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/BRCA case_ids.tsv'
+
+    clinical_file = pd.read_csv(clinical_file_path, sep='\t')
+    case_id_selection = pd.read_csv(case_id_selection_path, sep='\t')['case_id'].to_list()
+   
+    print(clinical_file)
+    clinical_file = clinical_file[clinical_file['case_id'].isin(case_id_selection)]
+    
+    clinical_file.to_csv('C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/BRCA - case_id and clinical data - ids selected.tsv', index=False, sep='\t')
+
+    print(clinical_file)
+# clinical_data_filtering()
+
+def DW_modalities():
+    file_path = 'C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/BRCA - case_id and clinical data - ids selected.tsv'
+
+    data = pd.read_csv(file_path, sep='\t')
+
+    # tab_files_ids = pd.DataFrame(columns=['case_id','R_file_id', 'm_file_id', 'M_file_id', 'class'])
+    tab_files_ids = pd.DataFrame(columns=['case_id','R_file_id', 'm_file_id', 'class'])
+
+    for index in range(0, data.shape[0]):
+    
+        Rna = 0
+        miRna = 0
+        # meth = 0
+        # temp_list = []
+    
+        case_id_num = data['case_id'][index]
+    
+        R_temp_id = ''
+        m_temp_id = ''
+        # M_temp_id = ''
+        class_temp = None
+
+        for num in range(0, 160):
+
+            access_col = f'files.{num}.access'
+            data_format_col = f'files.{num}.data_format'
+            data_type_col= f'files.{num}.data_type'
+            # platform_col = f'files.{num}.platform'
+            file_id_col = f'files.{num}.file_id'
+
+            if data[access_col][index] == 'open':
+            
+                # RNA
+                if data[data_format_col][index] == 'TSV' and data[data_type_col][index] == 'Gene Expression Quantification':
+                    if Rna == 0:
+                        R_temp_id = data[file_id_col][index]
+                        Rna +=1
+
+                # miRNA
+                if data[data_format_col][index] == 'TXT' and data[data_type_col][index] == 'miRNA Expression Quantification':
+                    if miRna == 0:
+                        m_temp_id = data[file_id_col][index]
+                        miRna +=1
+
+                # HM27
+                # if data[data_format_col][index] == 'TXT' and data[data_type_col][index] == 'Methylation Beta Value' and data[platform_col][index] == 'Illumina Human Methylation 27':
+                #     if meth == 0:
+                #         M_temp_id = data[file_id_col][index]
+                #         meth +=1
+            
+        if data['demographic.vital_status'][index] == 'Dead':
+            surv = data['demographic.days_to_death'][index]
+            if surv >= 1826:
+                class_temp = 1
+            else:
+                class_temp = 0
+
+        elif data['demographic.vital_status'][index] == 'Alive':
+            surv = data['diagnoses.0.days_to_last_follow_up'][index]
+            if surv >= 1826:
+                class_temp = 1
+            else:
+                class_temp = 0
+        
+        # tab_files_ids.loc[index] = [case_id_num, R_temp_id, m_temp_id, M_temp_id, class_temp]
+        tab_files_ids.loc[index] = [case_id_num, R_temp_id, m_temp_id, class_temp]
+
+    tab_files_ids.to_csv('C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/BRCA_All_Modalities - case_id, file_ids, class.tsv', index=False, sep='\t')
+
+    R_Files_path = 'C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/RNA/RNA files'
+    m_Files_path = 'C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/miRNA/miRNA files'
+    # M_Files_path = 'C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/HM27/HM27 files'
+
+    R_man = pd.DataFrame()
+    m_man = pd.DataFrame()
+    # M_man = pd.DataFrame()
+    
+    R_man = tab_files_ids['R_file_id']
+    m_man = tab_files_ids['m_file_id']
+    # M_man = tab_files_ids['M_file_id']
+
+    DW_from_manifest(R_man, R_Files_path)
+    DW_from_manifest(m_man, m_Files_path)
+    # DW_from_manifest(M_man, M_Files_path)
+
+    combine_fiels()
+
+# DW_modalities()
+
+def DW_from_manifest(manifest_df: pd.DataFrame, download_folder:str):
+
+    # Download the data from the manifests
+
+    # GDC API endpoint for downloading files
+    base_url = 'https://api.gdc.cancer.gov/data/'
+
+    # Ensure the folder exists
+    os.makedirs(download_folder, exist_ok=True)
+
+    # List to store ETAs
+    etas = []
+
+    n_files = manifest_df.shape[0]
+    i = 1
+
+    # Loop through each mnt_id and download the file
+    print(f'\n\nManifest download started ({n_files} files)...\n')
+    for i, mnt_id in enumerate(manifest_df):
+        print(f'Downloading {mnt_id} ({i} of {n_files})')
+
+        success = False
+        attempts = 0
+        max_attempts = 10
+
+        while not success and attempts < max_attempts:
+            try:
+                start_time = time.time()
+                response = requests.get(f'{base_url}{mnt_id}', stream=True)
+                response.raise_for_status()  # Raise an HTTPError for bad responses
+
+                file_path = os.path.join(download_folder, f'{mnt_id}.tsv')
+
+                with open(file_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+
+                end_time = time.time()
+                download_time = end_time - start_time
+                etas.append(download_time)
+
+                # Calculate mean ETA
+                mean_eta = sum(etas) / len(etas)
+                time_left = mean_eta * (n_files - i)
+            
+                # Convert time_left to hours, minutes, and seconds
+                hours, rem = divmod(time_left, 3600)
+                minutes, seconds = divmod(rem, 60)
+            
+                print(f'DONE\nEstimated time left: {int(hours)}h {int(minutes)}m {int(seconds)}s\n')
+
+                success = True
+
+            except requests.exceptions.RequestException as e:
+                attempts += 1
+                print(f'Attempt {attempts} failed for {mnt_id}: {e}')
+                if attempts < max_attempts:
+                    print('Retrying...')
+
+        if not success:
+            print(f'Failed to download file with mnt_id: {mnt_id} after {max_attempts} attempts')
+
+    ...
+
+def combine_fiels():
+
+    file_ids = pd.read_csv('C:/Users/somo1/Documents/VSCode/Python/data/OV/OV RmM data/All_Modalities - case_id, file_ids, class.tsv', sep = '\t')
+
+    R_data = pd.DataFrame()
+    m_data = pd.DataFrame()
+    # M_data = pd.DataFrame()
+
+    for i,row in file_ids.iterrows():
+        
+        R_Files_path = f'C:/Users/somo1/Documents/VSCode/Python/data/OV/OV RmM data/RNA/RNA files/{row['R_file_id']}.tsv'
+        m_Files_path = f'C:/Users/somo1/Documents/VSCode/Python/data/OV/OV RmM data/miRNA/miRNA files/{row['m_file_id']}.tsv'
+        # M_Files_path = f'C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/HM27/HM27 files/{row['M_file_id']}.tsv'
+        temp_calss = row['class']
+
+        # RNA data preprocessing
+        R_data_temp = pd.read_csv(R_Files_path, sep = '\t', skiprows=[0,2,3,4,5])
+        R_data_temp = R_data_temp.drop(columns=['gene_name', 'gene_type', 'unstranded', 'stranded_first', 'stranded_second', 'fpkm_unstranded', 'fpkm_uq_unstranded'])
+        R_data_temp = R_data_temp.set_index('gene_id').T
+        R_data_temp['class'] = temp_calss
+        R_data = pd.concat([R_data, R_data_temp], ignore_index=True)
+
+
+        # miRNA data preprocessing
+        m_data_temp = pd.read_csv(m_Files_path, sep = '\t')
+        m_data_temp = m_data_temp.drop(columns=['read_count', 'cross-mapped'])
+        m_data_temp = m_data_temp.set_index('miRNA_ID').T
+        m_data_temp['class'] = temp_calss
+        m_data = pd.concat([m_data, m_data_temp], ignore_index=True)
+
+    # filter low counts R
+    R_filter_low_counts = R_data.drop(columns='class')
+    R_column_means = R_filter_low_counts.mean()
+    R_boolean_mask = R_column_means > 1
+    R_filtered_columns = R_filter_low_counts.loc[:, R_boolean_mask]
+    R_filtered_columns = np.log2(R_filtered_columns + 1)
+    R_filtered_columns['class'] = R_data['class']
+
+    # filter low counts m
+    m_filter_low_counts = m_data.drop(columns='class')
+    m_column_means = m_filter_low_counts.mean()
+    m_boolean_mask = m_column_means > 1
+    m_filtered_columns = m_filter_low_counts.loc[:, m_boolean_mask]
+    m_filtered_columns = np.log2(m_filtered_columns + 1)
+    m_filtered_columns['class'] = m_data['class']
+
+
+    R_filtered_columns.to_csv('C:/Users/somo1/Documents/VSCode/Python/data/OV/OV RmM data/RNA/RNA_taining_data_no_low_counts.tsv', sep = '\t', index = False)
+
+    m_filtered_columns.to_csv('C:/Users/somo1/Documents/VSCode/Python/data/OV/OV RmM data/miRNA/miRNA_taining_data_no_low_counts.tsv', sep = '\t', index = False)
+
+    # zprint(M_data)
+    # M_data.to_csv('C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/HM27/HM27_taining_data.tsv', sep = '\t', index = False)
+# combine_fiels()
+# DW_modalities()
+
+
+def mRMR_FS(path:str, k):
+
+    data = pd.read_csv(path, sep = '\t')
+
+    X = data.drop(columns='class').values
+    y = data['class'].values
+
+    chi2_selector = SelectKBest(score_func=chi2, k=k*2)
+    X_ch2 = chi2_selector.fit_transform(X, y)
+
+    selected_features = mrmr_classif(X = pd.DataFrame(X_ch2) , y = pd.DataFrame(y), K = k)
+    X_sel = X_ch2[:, selected_features]
+    X_sel_df = pd.DataFrame(X_sel)
+
+    X_sel_df['class'] = y
+
+    X_sel_df.to_csv('C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/miRNA/miRNA_sel_taining_data.tsv', sep = '\t', index = False)
+# mRMR_FS('C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/miRNA/miRNA_taining_data.tsv', 200)
+
+def merge_datasets (path_OV:str, path_BRCA:str):
+
+    OV_df = pd.read_csv(path_OV, sep = '\t')
+    BRCA_df = pd.read_csv(path_BRCA, sep = '\t')
+
+    OV_df['class'] = 0
+    BRCA_df['class'] = 1
+
+    merged_df = pd.concat([OV_df, BRCA_df], ignore_index=True)
+
+    shuffled_df = merged_df.sample(frac=1)
+    # shuffled_df.to_csv('C:/Users/somo1/Documents/VSCode/Python/data/Merged_RNA/BRCA_OV_RNA.tsv', sep='\t', index=False)
+
+# merge_datasets('C:/Users/somo1/Documents/VSCode/Python/data/OV/OV RmM data/miRNA/miRNA_taining_data.tsv', 'C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/miRNA/miRNA_taining_data.tsv')
+
+def tumor_stage():
+
+    clinical_data = pd.read_csv('C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA_TUMOR STAGE.csv', sep=',')
+    file_ids = pd.read_csv('C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/BRCA_All_Modalities - case_id, file_ids, class.tsv', sep = '\t')
+    
+    clinical_data['case_id'] = clinical_data['case_id'].astype(str) 
+    clinical_data['case_id'] = file_ids['case_id'].astype(str)
+
+    filtered_df = clinical_data[clinical_data['case_id'].isin(file_ids['case_id'])]
+
+    file_ids['class'] = filtered_df['class']
+
+
+    R_data = pd.DataFrame()
+    m_data = pd.DataFrame()
+    # M_data = pd.DataFrame()
+
+    for i,row in file_ids.iterrows():
+        
+        R_Files_path = f'C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/RNA/RNA files/{row['R_file_id']}.tsv'
+        m_Files_path = f'C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/miRNA/miRNA files/{row['m_file_id']}.tsv'
+        # M_Files_path = f'C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/HM27/HM27 files/{row['M_file_id']}.tsv'
+        temp_calss = row['class']
+
+        # RNA data preprocessing
+        R_data_temp = pd.read_csv(R_Files_path, sep = '\t', skiprows=[0,2,3,4,5])
+        R_data_temp = R_data_temp.drop(columns=['gene_name', 'gene_type', 'unstranded', 'stranded_first', 'stranded_second', 'fpkm_unstranded', 'fpkm_uq_unstranded'])
+        R_data_temp = R_data_temp.set_index('gene_id').T
+        R_data_temp['class'] = temp_calss
+        R_data = pd.concat([R_data, R_data_temp], ignore_index=True)
+
+
+        # miRNA data preprocessing
+        m_data_temp = pd.read_csv(m_Files_path, sep = '\t')
+        m_data_temp = m_data_temp.drop(columns=['read_count', 'cross-mapped'])
+        m_data_temp = m_data_temp.set_index('miRNA_ID').T
+        m_data_temp['class'] = temp_calss
+        m_data = pd.concat([m_data, m_data_temp], ignore_index=True)
+
+    # filter low counts R
+    R_filter_low_counts = R_data.drop(columns='class')
+    R_column_means = R_filter_low_counts.mean()
+    R_boolean_mask = R_column_means > 1
+    R_filtered_columns = R_filter_low_counts.loc[:, R_boolean_mask]
+    R_filtered_columns = np.log2(R_filtered_columns + 1)
+    R_filtered_columns['class'] = R_data['class']
+
+    # filter low counts m
+    m_filter_low_counts = m_data.drop(columns='class')
+    m_column_means = m_filter_low_counts.mean()
+    m_boolean_mask = m_column_means > 1
+    m_filtered_columns = m_filter_low_counts.loc[:, m_boolean_mask]
+    m_filtered_columns = np.log2(m_filtered_columns + 1)
+    m_filtered_columns['class'] = m_data['class']
+
+
+    R_filtered_columns.to_csv('C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/RNA/RNA_taining_data_tumor_stage.tsv', sep = '\t', index = False)
+
+    m_filtered_columns.to_csv('C:/Users/somo1/Documents/VSCode/Python/data/BRCA/BRCA RmM data/miRNA/miRNA_taining_data_tumor_stage.tsv', sep = '\t', index = False)
+
+
+    return...
+tumor_stage()
